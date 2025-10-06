@@ -1,0 +1,180 @@
+(async () => {
+  // ===== Helpers =====
+  const sleep = ms => new Promise(r=>setTimeout(r,ms));
+  const vis = el => el && (()=>{const r=el.getBoundingClientRect(), s=getComputedStyle(el); return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none';})();
+  const txt = el => (el?.innerText || el?.textContent || '').trim();
+  const menus = () => [...document.querySelectorAll('[data-context-menu="true"],[role="menu"],[data-radix-popper-content-wrapper],.popover,.dropdown,[data-state="open"]')].filter(vis);
+  const listItems = root => [...new Set([...root.querySelectorAll('button,[role="menuitem"],.context-menu-button,a,div[tabindex],span[tabindex]')])].filter(vis);
+  const isDL  = el => /^(download|herunterladen)$/i.test(txt(el));
+  const isMP3 = el => /mp3\s*audio/i.test(txt(el)) || el?.getAttribute?.('aria-label') === 'MP3 Audio';
+  const focusEl = el => { if(!el) return false; el.scrollIntoView({block:'center',inline:'center'}); try{el.focus({preventScroll:true});}catch{} return document.activeElement===el; };
+  const pressEnter = el => { const kd=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true}); el?.dispatchEvent(kd); document.dispatchEvent(kd); el?.click?.(); };
+  const closeMenus = () => { document.activeElement?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true})); document.body.click(); };
+
+  const CARD_SELS = ['[role="row"]','[role="listitem"]','article','.card','.track','.song'];
+
+  const collectCards = () => [...new Set(CARD_SELS.flatMap(s=>[...document.querySelectorAll(s)]) )].filter(vis);
+
+  // Auto-Scroll zum Einsammeln weiterer Karten
+  async function autoloadCards(targetCount, maxSweeps=20, waitPerStep=450) {
+    let prevCount = -1, sweeps = 0;
+    const scrollRoots = [
+      document.querySelector('[data-radix-scroll-area-viewport]'),
+      document.querySelector('[role="grid"]'),
+      document.querySelector('main'),
+      document.scrollingElement,
+      document.body
+    ].filter(Boolean);
+
+    const getY = () => (document.scrollingElement || document.documentElement || document.body).scrollTop;
+    const setY = (y) => (document.scrollingElement || document.documentElement || document.body).scrollTo({top:y, behavior:'instant'});
+
+    while (sweeps < maxSweeps) {
+      let cards = collectCards();
+      if (cards.length >= targetCount) break;
+      if (cards.length === prevCount) sweeps++; else sweeps = 0; // nur zählen, wenn kein Zuwachs
+      prevCount = cards.length;
+
+      // versuche in jedem Root zu scrollen
+      let didScroll = false;
+      for (const root of scrollRoots) {
+        try {
+          if (root === document.body || root === document.scrollingElement) {
+            const y0 = getY();
+            setY(y0 + window.innerHeight * 0.9);
+            didScroll = true;
+          } else {
+            root.scrollBy(0, root.clientHeight * 0.9);
+            didScroll = true;
+          }
+        } catch {}
+      }
+
+      await sleep(waitPerStep);
+      // optional: "Load more" / "Mehr" / "Next" klicken, falls vorhanden
+      const moreBtn = [...document.querySelectorAll('button,a')].find(b => vis(b) && /^(load more|mehr|weiter|next)$/i.test(txt(b)));
+      if (moreBtn) { moreBtn.click(); await sleep(700); }
+      if (!didScroll) break;
+    }
+    return collectCards();
+  }
+
+  async function openContextOn(el){
+    const r = el.getBoundingClientRect();
+    const x = r.left + Math.min(Math.max(8, r.width*0.25), 24);
+    const y = r.top  + Math.min(Math.max(8, r.height*0.55), 24);
+    const base = {bubbles:true,cancelable:true,view:window,clientX:x,clientY:y};
+    el.dispatchEvent(new MouseEvent('pointerdown',{...base, button:2}));
+    el.dispatchEvent(new MouseEvent('contextmenu',{...base, button:2}));
+    el.dispatchEvent(new MouseEvent('pointerup',{...base, button:2}));
+  }
+
+  // ===== Pre-scan & Prompts =====
+  let cards = collectCards();
+  const wantAuto = confirm(`Aktuell gefunden: ${cards.length} Karten.\nAuto-Scroll ausführen, um mehr zu laden?`);
+  if (wantAuto) {
+    const wantTarget = prompt('Ziel-Anzahl Karten zum Einsammeln? (z.B. 50)', '50');
+    const target = Math.max(1, parseInt(wantTarget||'50',10));
+    cards = await autoloadCards(target, /*maxSweeps*/ 30, /*wait*/ 500);
+    console.log(`↺ Nach Auto-Scroll gefunden: ${cards.length} Karten.`);
+  }
+  if (!cards.length) { console.warn('Keine sichtbaren Karten.'); return; }
+
+  const maxDefault = Math.min(10, cards.length);
+  let count = prompt(`Wie viele Songs von oben herunterladen? (1–${cards.length}, Standard ${maxDefault})`, String(maxDefault));
+  if (count === null) { console.warn('Abbruch (Prompt).'); return; }
+  count = Math.min(cards.length, Math.max(1, parseInt(count,10) || maxDefault));
+
+  let offset = prompt(`Ab welchem Index starten? (1 = oberste Karte, Standard 1)`, '1');
+  if (offset === null) { console.warn('Abbruch (Prompt).'); return; }
+  offset = Math.max(1, parseInt(offset,10) || 1);
+
+  let delaySec = prompt('Pause zwischen Downloads (Sek.)? (Standard 5)', '5');
+  if (delaySec === null) { console.warn('Abbruch (Prompt).'); return; }
+  delaySec = Math.max(0, parseFloat(delaySec) || 5);
+
+  // Slice nach Offset & Count
+  const startIdx = offset - 1;
+  const runCards = cards.slice(startIdx, startIdx + count);
+  if (!runCards.length) { console.warn('Auswahl leer (Offset zu groß).'); return; }
+
+  console.table(runCards.map((c,i)=>({'#': startIdx + i + 1, title: (c.getAttribute('aria-label')||txt(c)||`Song #${startIdx+i+1}`).slice(0,60)})));
+  console.log(`Starte ${runCards.length}x MP3 (Fokus+Enter) ab Index ${offset}. Not-Aus: ESC (echte Taste) oder window.__abortDownloads = true`);
+
+  // ===== Not-Aus =====
+  window.__abortDownloads = false;
+  const onKey = (e) => { if (e.key === 'Escape' && e.isTrusted) window.__abortDownloads = true; };
+  window.addEventListener('keydown', onKey, true);
+
+  // ===== Tuning =====
+  const OPEN_WAIT=800, STEP_WAIT=150, POLL_TRIES=30, POLL_STEP=100;
+
+  try {
+    for (let i=0;i<runCards.length;i++){
+      if (window.__abortDownloads) { console.warn('⛔ Abgebrochen.'); break; }
+      const card = runCards[i];
+      console.log(`(${i+1}/${runCards.length}) Starte …`);
+
+      try{
+        closeMenus();
+        await openContextOn(card);
+        for (let t=0;t<15 && !menus().length;t++) await sleep(60);
+        await sleep(OPEN_WAIT);
+
+        const top = menus()[0];
+        if (!top) { console.warn('Top-Menü fehlt → skip'); continue; }
+        let itemsTop = listItems(top);
+        if (!itemsTop.length){ console.warn('Keine Menü-Items → skip'); continue; }
+
+        // zu "Download" fokussieren
+        let dl=null;
+        for (const el of itemsTop){
+          if (window.__abortDownloads) break;
+          focusEl(el); await sleep(STEP_WAIT);
+          if (isDL(el)) { dl=el; break; }
+        }
+        if (window.__abortDownloads) { console.warn('⛔ Abgebrochen.'); break; }
+        if (!dl){ console.warn('„Download“ nicht gefunden → skip'); continue; }
+
+        // Submenü per Enter öffnen
+        pressEnter(dl);
+        await sleep(STEP_WAIT);
+
+        // Submenü root ermitteln (oder inline)
+        let sub = null;
+        for (let t=0;t<POLL_TRIES && !(sub = menus().find(r=>r!==top)); t++) await sleep(POLL_STEP);
+        if (!sub) sub = top;
+
+        // MP3 fokussieren
+        let itemsSub = listItems(sub);
+        if (!itemsSub.length){ await sleep(200); itemsSub = listItems(sub); }
+
+        let mp3=null;
+        for (const el of itemsSub){
+          if (window.__abortDownloads) break;
+          focusEl(el); await sleep(STEP_WAIT);
+          if (isMP3(el)) { mp3=el; break; }
+        }
+        if (window.__abortDownloads) { console.warn('⛔ Abgebrochen.'); break; }
+        if (!mp3){ console.warn('„MP3 Audio“ nicht gefunden → skip'); continue; }
+
+        // Enter → Download starten
+        pressEnter(mp3);
+        console.log('→ MP3 ausgelöst.');
+
+      } catch(e){ console.error('Fehler:', e); }
+
+      if (i < runCards.length-1){
+        const jitter = Math.random()*300;
+        for (let t=0; t < (delaySec*1000 + jitter); t+=150){
+          if (window.__abortDownloads) break;
+          await sleep(150);
+        }
+        if (window.__abortDownloads) { console.warn('⛔ Abgebrochen vor nächstem Track.'); break; }
+      }
+    }
+  } finally {
+    window.removeEventListener('keydown', onKey, true);
+    console.log('Fertig. Listener entfernt.');
+  }
+})();
